@@ -4,3 +4,7 @@ pydantic
 sqlalchemy
 openai
 python-dotenv
+faster-whisper
+pyaudio
+openwakeword
+httpx
