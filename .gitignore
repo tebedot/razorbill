@@ -1,10 +1,19 @@
-# Python
-backend/venv/
-__pycache__/
-
 # Node
-frontend/node_modules/
+node_modules/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
 .env
 
-# Mac OS
+# OS
 .DS_Store
+
+# Memory / Database
+*.sqlite3
+*.db
+memory/
