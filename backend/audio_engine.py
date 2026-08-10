@@ -2,16 +2,14 @@ import os
 import httpx
 from faster_whisper import WhisperModel
 
-# Initialize Whisper model (we'll use 'base' for faster local processing, can be upgraded to 'small' or 'medium' later)
+# Initialize Whisper model (we use 'medium.en' for maximum accuracy)
 whisper_model = None
 
 def get_whisper_model():
     global whisper_model
     if whisper_model is None:
         # Load the model on first use to save initial startup time
-        # Using 'cpu' by default since this is a Mac. If it's an M-series Mac, 
-        # faster-whisper doesn't fully utilize CoreML yet, but 'cpu' works fine.
-        whisper_model = WhisperModel("base.en", device="cpu", compute_type="int8")
+        whisper_model = WhisperModel("medium.en", device="cpu", compute_type="int8")
     return whisper_model
 
 def transcribe_audio(file_path: str) -> str:
@@ -19,7 +17,12 @@ def transcribe_audio(file_path: str) -> str:
     Transcribes the given audio file using faster-whisper.
     """
     model = get_whisper_model()
-    segments, info = model.transcribe(file_path, beam_size=5)
+    # Add initial_prompt to help the model recognize specific vocabulary
+    segments, info = model.transcribe(
+        file_path, 
+        beam_size=5, 
+        initial_prompt="Razor Bill, Kimi, LLM, aware, model, AI"
+    )
     
     text = "".join([segment.text for segment in segments])
     return text.strip()
@@ -48,7 +51,8 @@ def synthesize_speech(text: str) -> bytes:
     }
     
     with httpx.Client() as client:
-        response = client.post(url, headers=headers, json=payload, timeout=30.0)
+        # Set timeout to 60s per user request
+        response = client.post(url, headers=headers, json=payload, timeout=60.0)
         
         if response.status_code != 200:
             raise Exception(f"Fish Audio API error {response.status_code}: {response.text}")

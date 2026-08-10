@@ -22,11 +22,11 @@ def generate_chat_response(messages: List[Dict[str, str]], stream: bool = False)
     """
     client = get_client()
     
-    # We use kimi-k3 as the flagship model, with reasoning effort set to max by default
+    # We use kimi-k3 as the flagship model, with reasoning effort set to low as requested
     response = client.chat.completions.create(
         model="kimi-k3",
         messages=messages,
-        reasoning_effort="max", 
+        reasoning_effort="low", 
         stream=stream
     )
     

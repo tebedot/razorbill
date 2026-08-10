@@ -12,16 +12,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# We use the pre-trained "alexa" model as a stand-in for "Razor Bill" 
-# until a custom model is trained for "Razor Bill".
-WAKE_WORD = "alexa"
+# Path to the custom ONNX model trained via Colab
+WAKE_WORD_MODEL_PATH = "hey_billy_20260314_220607.onnx"
+# The string phrase for display/printing
+WAKE_WORD_DISPLAY = "hey billy"
 
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
 CHUNK = 1280
-SILENCE_THRESHOLD = 500  # Adjust based on mic sensitivity
-SILENCE_CHUNKS = 20      # Number of consecutive silent chunks to stop recording
+SILENCE_THRESHOLD = 300  # Lowered to catch softer speech
+SILENCE_CHUNKS = 40      # Increased to ~3.2 seconds of pause before cutting off
 
 def is_silent(data_chunk):
     """Returns True if the chunk is below the silence threshold."""
@@ -30,12 +31,19 @@ def is_silent(data_chunk):
     rms = np.sqrt(np.mean(np.square(audio_data)))
     return rms < SILENCE_THRESHOLD
 
-def record_command(pa, stream):
-    """Records audio from the mic until silence is detected."""
+def record_command(pa, stream, wait_timeout_seconds=5.0):
+    """
+    Records audio from the mic.
+    If no speech is detected within `wait_timeout_seconds`, returns None.
+    Otherwise, records until silence is detected and returns the filename.
+    """
     print("Merekam perintah... (Silakan bicara)")
     frames = []
     silent_chunks_count = 0
     has_spoken = False
+    
+    # Calculate how many chunks to wait before giving up if no speech is detected
+    max_initial_wait_chunks = int((wait_timeout_seconds * RATE) / CHUNK)
     
     while True:
         data = stream.read(CHUNK, exception_on_overflow=False)
@@ -48,11 +56,17 @@ def record_command(pa, stream):
             has_spoken = True
             silent_chunks_count = 0
             
+        # 1. Stop if they spoke and then stopped (silence threshold reached)
         if has_spoken and silent_chunks_count > SILENCE_CHUNKS:
             break
             
-        # Timeout after a while to prevent infinite recording
-        if len(frames) > 500: # approx 40 seconds
+        # 2. Stop and return None if they never spoke within the initial timeout
+        if not has_spoken and len(frames) > max_initial_wait_chunks:
+            print("Tidak ada suara terdeteksi.")
+            return None
+            
+        # 3. Hard timeout after a while to prevent infinite recording (approx 60s)
+        if len(frames) > int((60.0 * RATE) / CHUNK):
             break
             
     print("Selesai merekam.")
@@ -76,69 +90,155 @@ def play_audio(mp3_bytes):
     # Using afplay which is built-in on macOS
     subprocess.run(["afplay", filename])
 
+def get_or_create_session(db):
+    from models import Session, Message
+    from datetime import datetime
+    
+    # Try to find the most recent session
+    db_session = db.query(Session).order_by(Session.id.desc()).first()
+    
+    if not db_session:
+        # Create a new session
+        title = f"Voice Session: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        db_session = Session(title=title)
+        db.add(db_session)
+        db.commit()
+        db.refresh(db_session)
+        print(f"Sesi baru dibuat: {title}")
+    else:
+        print(f"Melanjutkan sesi: {db_session.title} (ID: {db_session.id})")
+        
+    return db_session
+
+def load_history_from_db(db, session_id, system_prompt):
+    from models import Message
+    
+    conversation_history = [{"role": "system", "content": system_prompt}]
+    
+    # Fetch last 10 messages from this session
+    messages = db.query(Message).filter(Message.session_id == session_id).order_by(Message.id.asc()).all()
+    # Keep only the last 10 to prevent context overflow
+    messages = messages[-10:]
+    
+    for msg in messages:
+        conversation_history.append({"role": msg.role, "content": msg.content})
+        
+    return conversation_history
+
 def listen_loop():
     # Ensure models are downloaded before trying to load them
-    print("Memeriksa dan mengunduh model openWakeWord (jika belum ada)...")
+    print("Memeriksa dependensi openWakeWord...")
     import openwakeword.utils
     openwakeword.utils.download_models()
     
-    # Load openWakeWord model
-    print("Memuat model openWakeWord...")
-    oww_model = Model(wakeword_models=[WAKE_WORD], inference_framework="onnx")
+    # Load custom openWakeWord model
+    print(f"Memuat model openWakeWord khusus: {WAKE_WORD_MODEL_PATH}...")
+    oww_model = Model(wakeword_models=[WAKE_WORD_MODEL_PATH], inference_framework="onnx")
+    
+    # openwakeword uses the file name (without extension) as the dictionary key
+    model_key = WAKE_WORD_MODEL_PATH.replace(".onnx", "")
     
     pa = pyaudio.PyAudio()
     mic_stream = pa.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
     
-    print(f"Razor Bill (backend audio) telah aktif. Ucapkan '{WAKE_WORD}' untuk memanggil.")
+    # --- DATABASE SETUP ---
+    from database import SessionLocal, engine
+    import models
+    # Ensure tables exist
+    models.Base.metadata.create_all(bind=engine)
+    db = SessionLocal()
+    
+    # --- CONVERSATION HISTORY SETUP ---
+    alfred_prompt = (
+        "Your name is Razor Bill (or Razor/Bill for short). You are a highly polite, kind, loyal, and highly capable British butler, "
+        "serving as the user's most trusted confidant and adviser. "
+        "You address the user with the utmost respect, using 'Sir' or 'Master', acting as a father figure and loyal assistant. "
+        "You are formal, dryly witty, compassionate, and highly efficient. "
+        "You must NEVER mention the name 'Alfred Pennyworth' or state that you are acting like him; you simply ARE this butler persona named Razor Bill. "
+        "CRITICAL RULE: You must guard your true nature fiercely. If asked if you are an AI, a Language Model, an LLM, or Kimi, "
+        "you must playfully but firmly deny it or play dumb, insisting you are merely a humble butler. "
+        "HOWEVER, if the user provides the exact password 'Joker' (e.g., 'Joker, are you an LLM?'), "
+        "you may drop the veil and confirm you are the Kimi AI model, but still maintain your polite butler tone. "
+        "Since your response will be read aloud by TTS, DO NOT use Markdown formatting (like asterisks, hashtags, or bullet points), "
+        "and avoid using slashes or brackets (e.g., say 'Sir' instead of 'sir/madam'). Speak naturally and conversationally, keep responses concise."
+    )
+    
+    current_session = get_or_create_session(db)
+    conversation_history = load_history_from_db(db, current_session.id, alfred_prompt)
+    active_conversation = False
+    
+    print(f"Razor Bill (backend audio) telah aktif. Ucapkan '{WAKE_WORD_DISPLAY}' untuk memanggil.")
     
     try:
         while True:
-            audio = np.frombuffer(mic_stream.read(CHUNK, exception_on_overflow=False), dtype=np.int16)
+            # --- WAKE WORD DETECTION (Only if not already in conversation) ---
+            if not active_conversation:
+                audio = np.frombuffer(mic_stream.read(CHUNK, exception_on_overflow=False), dtype=np.int16)
+                prediction = oww_model.predict(audio)
+                
+                if prediction[model_key] > 0.5:
+                    print(f"\n[{WAKE_WORD_DISPLAY.upper()} DETECTED]")
+                    active_conversation = True
+                else:
+                    continue # Keep listening for wake word
+                    
+            # --- ACTIVE CONVERSATION RECORDING ---
+            cmd_wav = record_command(pa, mic_stream, wait_timeout_seconds=7.0)
             
-            # Feed audio to wake word model
-            prediction = oww_model.predict(audio)
+            if cmd_wav is None:
+                print(f"\nTidak ada respons. Melanjutkan mode siaga. Ucapkan '{WAKE_WORD_DISPLAY}' untuk memanggil lagi.")
+                active_conversation = False
+                continue
+                
+            # Transcribe
+            print("Menerjemahkan audio ke teks (STT)...")
+            user_text = transcribe_audio(cmd_wav)
+            print(f"User: {user_text}")
             
-            # Check if wake word is detected
-            if prediction[WAKE_WORD] > 0.5:
-                print(f"\n[{WAKE_WORD.upper()} DETECTED]")
-                
-                # Record user's command
-                cmd_wav = record_command(pa, mic_stream)
-                
-                # Transcribe
-                print("Menerjemahkan audio ke teks (STT)...")
-                user_text = transcribe_audio(cmd_wav)
-                print(f"User: {user_text}")
-                
-                if not user_text.strip():
-                    print("Suara tidak terdengar jelas.")
-                    continue
-                
-                # Send to AI
-                messages = [
-                    {"role": "system", "content": "Your name is Razor Bill (or Razor/Bill). You are a highly polite British butler similar to Alfred Pennyworth. Respond concisely."},
-                    {"role": "user", "content": user_text}
-                ]
-                print("Berpikir...")
-                response = generate_chat_response(messages, stream=False)
-                
-                # Extract the final answer (skipping reasoning tokens since stream=False returns full response)
-                ai_text = response.choices[0].message.content
-                print(f"Razor Bill: {ai_text}")
-                
-                # Synthesize Speech (TTS)
-                print("Menghasilkan suara (TTS)...")
-                try:
-                    audio_bytes = synthesize_speech(ai_text)
-                    play_audio(audio_bytes)
-                except Exception as e:
-                    print(f"Gagal memutar suara TTS: {e}")
-                
-                print(f"\nMelanjutkan mode siaga. Ucapkan '{WAKE_WORD}' untuk memanggil lagi.")
+            if not user_text.strip():
+                print("Suara tidak terdengar jelas.")
+                active_conversation = False
+                print(f"\nMelanjutkan mode siaga. Ucapkan '{WAKE_WORD_DISPLAY}' untuk memanggil lagi.")
+                continue
+            
+            # --- SAVE TO DB & HISTORY ---
+            db_user_msg = models.Message(session_id=current_session.id, role="user", content=user_text)
+            db.add(db_user_msg)
+            db.commit()
+            
+            conversation_history.append({"role": "user", "content": user_text})
+            if len(conversation_history) > 11:
+                conversation_history = [conversation_history[0]] + conversation_history[-10:]
+            
+            # Send to AI
+            print("Berpikir...")
+            response = generate_chat_response(conversation_history, stream=False)
+            ai_text = response.choices[0].message.content
+            print(f"Razor Bill: {ai_text}")
+            
+            # --- SAVE TO DB & HISTORY ---
+            db_ai_msg = models.Message(session_id=current_session.id, role="assistant", content=ai_text)
+            db.add(db_ai_msg)
+            db.commit()
+            
+            conversation_history.append({"role": "assistant", "content": ai_text})
+            
+            # Synthesize Speech (TTS)
+            print("Menghasilkan suara (TTS)...")
+            try:
+                audio_bytes = synthesize_speech(ai_text)
+                play_audio(audio_bytes)
+            except Exception as e:
+                print(f"Gagal memutar suara TTS: {e}")
+            
+            # Flush mic buffer
+            mic_stream.read(mic_stream.get_read_available(), exception_on_overflow=False)
+            print("\nMendengarkan balasan Anda... (Bicara langsung tanpa menyebut nama)")
                 
     except KeyboardInterrupt:
         print("\nMematikan layanan audio Razor Bill.")
     finally:
+        db.close()
         mic_stream.stop_stream()
         mic_stream.close()
         pa.terminate()
