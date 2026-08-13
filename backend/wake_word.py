@@ -9,6 +9,40 @@ import subprocess
 from audio_engine import transcribe_audio, synthesize_speech
 from ai_engine import generate_chat_response
 from dotenv import load_dotenv
+import asyncio
+import websockets
+import json
+import threading
+
+CONNECTED_CLIENTS = set()
+ws_loop = None
+
+async def register(websocket):
+    CONNECTED_CLIENTS.add(websocket)
+    try:
+        await websocket.wait_closed()
+    finally:
+        CONNECTED_CLIENTS.remove(websocket)
+
+async def ws_server_main():
+    print("Memulai WebSocket server di ws://localhost:8000...")
+    async with websockets.serve(register, "localhost", 8000):
+        await asyncio.Future()
+
+def start_ws_server_thread():
+    global ws_loop
+    ws_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(ws_loop)
+    ws_loop.run_until_complete(ws_server_main())
+
+async def _broadcast_state(state: str):
+    if CONNECTED_CLIENTS:
+        message = json.dumps({"state": state})
+        await asyncio.gather(*(client.send(message) for client in CONNECTED_CLIENTS))
+
+def broadcast_state(state: str):
+    if ws_loop and ws_loop.is_running():
+        asyncio.run_coroutine_threadsafe(_broadcast_state(state), ws_loop)
 
 load_dotenv()
 
@@ -148,6 +182,9 @@ def listen_loop():
     models.Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     
+    # --- WEBSOCKET THREAD ---
+    threading.Thread(target=start_ws_server_thread, daemon=True).start()
+    
     # --- CONVERSATION HISTORY SETUP ---
     alfred_prompt = (
         "Your name is Razor Bill (or Razor/Bill for short). You are a highly polite, kind, loyal, and highly capable British butler, "
@@ -173,12 +210,14 @@ def listen_loop():
         while True:
             # --- WAKE WORD DETECTION (Only if not already in conversation) ---
             if not active_conversation:
+                broadcast_state("idle")
                 audio = np.frombuffer(mic_stream.read(CHUNK, exception_on_overflow=False), dtype=np.int16)
                 prediction = oww_model.predict(audio)
                 
                 if prediction[model_key] > 0.5:
                     print(f"\n[{WAKE_WORD_DISPLAY.upper()} DETECTED]")
                     active_conversation = True
+                    broadcast_state("listening")
                 else:
                     continue # Keep listening for wake word
                     
@@ -188,9 +227,11 @@ def listen_loop():
             if cmd_wav is None:
                 print(f"\nTidak ada respons. Melanjutkan mode siaga. Ucapkan '{WAKE_WORD_DISPLAY}' untuk memanggil lagi.")
                 active_conversation = False
+                broadcast_state("idle")
                 continue
                 
             # Transcribe
+            broadcast_state("processing")
             print("Menerjemahkan audio ke teks (STT)...")
             user_text = transcribe_audio(cmd_wav)
             print(f"User: {user_text}")
@@ -198,6 +239,7 @@ def listen_loop():
             if not user_text.strip():
                 print("Suara tidak terdengar jelas.")
                 active_conversation = False
+                broadcast_state("idle")
                 print(f"\nMelanjutkan mode siaga. Ucapkan '{WAKE_WORD_DISPLAY}' untuk memanggil lagi.")
                 continue
             
@@ -227,6 +269,7 @@ def listen_loop():
             print("Menghasilkan suara (TTS)...")
             try:
                 audio_bytes = synthesize_speech(ai_text)
+                broadcast_state("speaking")
                 play_audio(audio_bytes)
             except Exception as e:
                 print(f"Gagal memutar suara TTS: {e}")
@@ -234,6 +277,7 @@ def listen_loop():
             # Flush mic buffer
             mic_stream.read(mic_stream.get_read_available(), exception_on_overflow=False)
             print("\nMendengarkan balasan Anda... (Bicara langsung tanpa menyebut nama)")
+            broadcast_state("listening")
                 
     except KeyboardInterrupt:
         print("\nMematikan layanan audio Razor Bill.")
