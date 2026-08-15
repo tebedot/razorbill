@@ -11,15 +11,30 @@ const ChatDashboard: React.FC = () => {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [sessionId, setSessionId] = useState<number | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const lastUserMessageRef = useRef<HTMLDivElement>(null);
+  const prevMessagesLength = useRef(0);
+  const [initialLoad, setInitialLoad] = useState(true);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    if (messages.length === 0) return;
+
+    if (initialLoad) {
+      // Instant snap on mount
+      if (lastUserMessageRef.current) {
+        lastUserMessageRef.current.scrollIntoView({ behavior: "auto", block: "start" });
+      } else {
+        messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
+      }
+      setInitialLoad(false);
+    } else if (messages.length > prevMessagesLength.current) {
+      // Smooth scroll only when NEW messages appear
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+    
+    prevMessagesLength.current = messages.length;
+  }, [messages, initialLoad]);
 
   const fetchMessages = async () => {
     try {
@@ -58,21 +73,26 @@ const ChatDashboard: React.FC = () => {
       });
       
       if (res.ok) {
-        const data = await res.json();
-        // Update with AI response
-        setMessages(prev => [...prev, data]);
+        // We let the polling pick up the AI response to avoid conflicts
+        fetchMessages();
       }
     } catch (e) {
       console.error("Failed to send message", e);
     }
   };
 
+  const lastUserMsgIndex = messages.map(m => m.role).lastIndexOf('user');
+
   return (
     <div className="chat-dashboard">
       <div className="chat-area">
         <div className="glass-panel chat-history" style={{ overflowY: 'auto' }}>
-          {messages.map(msg => (
-            <div key={msg.id} className={`message ${msg.role}`}>
+          {messages.map((msg, idx) => (
+            <div 
+              key={msg.id} 
+              className={`message ${msg.role}`}
+              ref={idx === lastUserMsgIndex ? lastUserMessageRef : null}
+            >
               {msg.content.replace(/\*\*/g, '')}
             </div>
           ))}

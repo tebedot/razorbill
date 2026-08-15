@@ -16,10 +16,13 @@ import threading
 
 CONNECTED_CLIENTS = set()
 ws_loop = None
+CURRENT_STATE = "idle"
 
 async def register(websocket):
     CONNECTED_CLIENTS.add(websocket)
     try:
+        # Send the current state immediately upon connection
+        await websocket.send(json.dumps({"state": CURRENT_STATE}))
         await websocket.wait_closed()
     finally:
         CONNECTED_CLIENTS.remove(websocket)
@@ -36,6 +39,8 @@ def start_ws_server_thread():
     ws_loop.run_until_complete(ws_server_main())
 
 async def _broadcast_state(state: str):
+    global CURRENT_STATE
+    CURRENT_STATE = state
     if CONNECTED_CLIENTS:
         message = json.dumps({"state": state})
         await asyncio.gather(*(client.send(message) for client in CONNECTED_CLIENTS))
