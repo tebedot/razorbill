@@ -17,3 +17,8 @@ env/
 *.sqlite3
 *.db
 memory/
+# Temporary audio files
+backend/temp_command.wav
+backend/temp_response.mp3
+*.wav
+*.mp3

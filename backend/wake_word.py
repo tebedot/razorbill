@@ -122,12 +122,12 @@ def record_command(pa, stream, wait_timeout_seconds=5.0):
     return filename
 
 def play_audio(mp3_bytes):
-    """Plays the given mp3 bytes using macOS afplay."""
+    """Plays the given mp3 bytes using macOS afplay asynchronously."""
     filename = "temp_response.mp3"
     with open(filename, "wb") as f:
         f.write(mp3_bytes)
-    # Using afplay which is built-in on macOS
-    subprocess.run(["afplay", filename])
+    # Return the process so we can terminate it if interrupted
+    return subprocess.Popen(["afplay", filename])
 
 def get_or_create_session(db):
     from models import Session, Message
@@ -271,16 +271,33 @@ def listen_loop():
             
             # Synthesize Speech (TTS)
             print("Menghasilkan suara (TTS)...")
+            interrupted = False
             try:
                 audio_bytes = synthesize_speech(ai_text)
                 broadcast_state("speaking")
-                play_audio(audio_bytes)
+                play_process = play_audio(audio_bytes)
+                
+                # Check for wake word while playing
+                while play_process.poll() is None:
+                    audio_chunk = mic_stream.read(CHUNK, exception_on_overflow=False)
+                    audio_np = np.frombuffer(audio_chunk, dtype=np.int16)
+                    prediction = oww_model.predict(audio_np)
+                    
+                    if prediction[model_key] > 0.5:
+                        print(f"\n[INTERRUPTED BY {WAKE_WORD_DISPLAY.upper()}]")
+                        play_process.terminate()
+                        interrupted = True
+                        break
+                        
             except Exception as e:
                 print(f"Gagal memutar suara TTS: {e}")
             
-            # Flush mic buffer
+            # Flush mic buffer to clear stale audio
             mic_stream.read(mic_stream.get_read_available(), exception_on_overflow=False)
-            print("\nMendengarkan balasan Anda... (Bicara langsung tanpa menyebut nama)")
+            if interrupted:
+                print("\nInterupsi berhasil. Mendengarkan perintah baru Anda...")
+            else:
+                print("\nMendengarkan balasan Anda... (Bicara langsung tanpa menyebut nama)")
             broadcast_state("listening")
                 
     except KeyboardInterrupt:
